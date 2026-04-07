@@ -195,6 +195,15 @@ export function activate(context: vscode.ExtensionContext) {
     // Try auto-detect on activation
     tryAutoDetectElf();
   }
+
+  // Re-sync webview when serial filter settings change
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('esp-decoder.serialFilters') && viewProvider) {
+        viewProvider.syncState();
+      }
+    })
+  );
 }
 
 function isPlatformIoBuildElf(elfPath: string): boolean {

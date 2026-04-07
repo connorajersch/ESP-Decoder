@@ -208,7 +208,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.syncState();
   }
 
-  private syncState(): void {
+  public syncState(): void {
+    const cfg = vscode.workspace.getConfiguration('esp-decoder');
     this.postMessage({
       type: 'initialState',
       connected: this.serialManager.isConnected,
@@ -216,6 +217,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       baudRate: this.serialManager.baudRate,
       elfPath: this.config.elfPath,
       targetArch: this.config.targetArch,
+      serialFilters: {
+        timestamp: cfg.get<boolean>('serialFilters.timestamp', false),
+        suppressPattern: cfg.get<string>('serialFilters.suppressPattern', ''),
+        highlightPattern: cfg.get<string>('serialFilters.highlightPattern', ''),
+      },
     });
   }
 
@@ -383,6 +389,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.crashEvents = [];
         this.crashCapturer.reset();
         break;
+      case 'saveFilters': {
+        const cfg = vscode.workspace.getConfiguration('esp-decoder');
+        await cfg.update('serialFilters.timestamp', message.timestamp, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.suppressPattern', message.suppressPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.highlightPattern', message.highlightPattern, vscode.ConfigurationTarget.Global);
+        break;
+      }
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
         if (event && this.config.elfPath) {
@@ -885,6 +898,50 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       outline: none;
     }
 
+    /* Filter toolbar */
+    .filter-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      font-size: 11px;
+    }
+    .filter-toolbar label {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      cursor: pointer;
+      white-space: nowrap;
+      opacity: 0.85;
+    }
+    .filter-toolbar label:hover { opacity: 1; }
+    .filter-toolbar input[type="checkbox"] { cursor: pointer; }
+    .filter-toolbar .filter-sep {
+      width: 1px;
+      height: 14px;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+    .filter-toolbar input[type="text"] {
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--input-border);
+      padding: 1px 5px;
+      font-size: 11px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      outline: none;
+      width: 140px;
+      border-radius: 2px;
+    }
+    .filter-toolbar input[type="text"].filter-error {
+      border-color: var(--error-fg);
+    }
+    .filter-toolbar .filter-label { opacity: 0.6; }
+
     /* Crash Events Panel */
     .crash-list {
       flex: 1;
@@ -1221,6 +1278,25 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   <!-- Serial Monitor Panel -->
   <div class="panel active" id="panel-serial" style="position:relative">
+    <!-- Filter toolbar -->
+    <div class="filter-toolbar" id="filter-toolbar">
+      <span class="filter-label">Filters:</span>
+      <label title="Prepend HH:MM:SS.mmm timestamp to each line">
+        <input type="checkbox" id="filter-timestamp"> Timestamp
+      </label>
+      <div class="filter-sep"></div>
+      <label title="Hide lines matching this regex">
+        <span class="filter-label">Suppress:</span>
+      </label>
+      <input type="text" id="filter-suppress" placeholder="regex…" title="Hide lines matching this regex (e.g. ^\s*$)">
+      <div class="filter-sep"></div>
+      <label title="Highlight matches of this regex">
+        <span class="filter-label">Highlight:</span>
+      </label>
+      <input type="text" id="filter-highlight" placeholder="regex…" title="Highlight matches of this regex">
+      <div class="filter-sep"></div>
+      <button id="filter-save" class="secondary" title="Save current filter settings to VS Code settings" style="font-size:11px;padding:1px 7px">Save</button>
+    </div>
     <div id="serial-output"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
     <div class="serial-input-row">
@@ -1273,6 +1349,47 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // scroll events and accidentally disabling autoscroll (race at high baud rates).
     let programmaticScroll = false;
 
+    // ── Serial filter state ──────────────────────────────────────────────────
+    const filterState = {
+      timestamp: false,
+      suppressPattern: '',
+      highlightPattern: '',
+      _suppressRe: null,
+      _highlightRe: null,
+    };
+
+    function filterSetSuppressPattern(pat) {
+      filterState.suppressPattern = pat;
+      try { filterState._suppressRe = pat ? new RegExp(pat) : null; }
+      catch (_) { filterState._suppressRe = null; }
+    }
+
+    function filterSetHighlightPattern(pat) {
+      filterState.highlightPattern = pat;
+      try { filterState._highlightRe = pat ? new RegExp(pat, 'g') : null; }
+      catch (_) { filterState._highlightRe = null; }
+    }
+
+    // Returns the (possibly modified) line string, or null to suppress it.
+    var ESC = String.fromCharCode(27);
+
+    function applyLineFilters(line) {
+      if (filterState._suppressRe && filterState._suppressRe.test(line)) { return null; }
+      if (filterState.timestamp) {
+        var now = new Date();
+        var ts = now.toISOString().slice(11, 23); // HH:MM:SS.mmm
+        line = ESC + '[2m[' + ts + ']' + ESC + '[0m ' + line;
+      }
+      if (filterState._highlightRe) {
+        filterState._highlightRe.lastIndex = 0;
+        line = line.replace(filterState._highlightRe, function(m) {
+          return ESC + '[7m' + m + ESC + '[27m';
+        });
+      }
+      return line;
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     // ANSI colour state for the serial terminal
     const ansiState = {
       bold: false, italic: false, underline: false, strikethrough: false,
@@ -1283,6 +1400,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     let ansiTail = '';
     let carriageReturn = false;
     let currentLine = null;
+    let currentLineRaw = ''; // raw text accumulator for the current line (for filters)
+    var CR = String.fromCharCode(13);
+    var LF = String.fromCharCode(10);
+    var CRLF = CR + LF;
+    const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
 
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
@@ -1412,6 +1534,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       ansiTail = '';
       carriageReturn = false;
       currentLine = null;
+      currentLineRaw = '';
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1419,6 +1542,33 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       crashList.appendChild(noCrashes);
       vscode.postMessage({ type: 'clear' });
     });
+
+    // ── Filter toolbar listeners ─────────────────────────────────────────────
+    document.getElementById('filter-timestamp').addEventListener('change', function() {
+      filterState.timestamp = this.checked;
+    });
+
+    document.getElementById('filter-suppress').addEventListener('input', function() {
+      filterSetSuppressPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._suppressRe === null);
+    });
+
+    document.getElementById('filter-highlight').addEventListener('input', function() {
+      filterSetHighlightPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._highlightRe === null);
+    });
+
+    document.getElementById('filter-save').addEventListener('click', () => {
+      vscode.postMessage({
+        type: 'saveFilters',
+        timestamp: filterState.timestamp,
+        suppressPattern: filterState.suppressPattern,
+        highlightPattern: filterState.highlightPattern,
+      });
+    });
+    // ────────────────────────────────────────────────────────────────────────
 
     // Paste / decode crash log modal
     document.getElementById('btn-paste-crash').addEventListener('click', () => {
@@ -1649,9 +1799,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       text = ansiTail + text;
       ansiTail = '';
 
-      var CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-      var CRLF = CR + LF;
-      var parts = text.split(new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')'));
+      // Split into alternating [content, separator, content, separator, ...]
+      // LINE_SPLIT_RE has a capturing group so separators are included in the array.
+      var parts = text.split(LINE_SPLIT_RE);
 
       // Ensure there is a currentLine wrapper to accumulate spans into.
       if (!currentLine) {
@@ -1661,28 +1811,41 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
       for (var p = 0; p < parts.length; p++) {
         var part = parts[p];
+
+        // Odd indices are the captured separators (CRLF, CR, or LF).
         if (p % 2 === 1) {
           if (part === CR) {
-            // Bare CR: mark for overwrite on next text chunk.
             carriageReturn = true;
           } else {
-            // LF or CRLF: emit a new logical line.
+            // LF or CRLF — commit the completed line through the filter pipeline.
+            var filtered = applyLineFilters(currentLineRaw);
+            if (filtered === null) {
+              if (currentLine && currentLine.parentNode === serialOutput) {
+                serialOutput.removeChild(currentLine);
+              }
+            } else if (filtered !== currentLineRaw) {
+              currentLine.textContent = '';
+              currentLine.appendChild(renderAnsiText(filtered));
+            }
+            currentLineRaw = '';
             carriageReturn = false;
             currentLine = document.createElement('div');
             serialOutput.appendChild(currentLine);
           }
           continue;
         }
+
+        // Even indices are content chunks.
         if (part === '') { continue; }
 
-        // Fix trailing-ANSI detection: find the last escape byte and only
-        // treat it as an incomplete tail if it doesn't form a complete sequence.
+        // Trailing-ANSI detection: only treat a trailing \x1b as incomplete if
+        // it doesn't form a complete CSI/escape sequence on its own.
         var renderText = part;
         if (p === parts.length - 1) {
           var lastEscape = part.lastIndexOf('\x1b');
           if (lastEscape !== -1) {
             var candidate = part.substring(lastEscape);
-            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][\\x00-\\x1f]?)').test(candidate);
+            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][^\\x00-\\x1f]?)').test(candidate);
             if (!completeEscape) {
               ansiTail = candidate;
               renderText = part.substring(0, lastEscape);
@@ -1690,15 +1853,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         }
 
-        var lineFragment = renderAnsiText(renderText);
         if (carriageReturn && currentLine) {
-          // Overwrite semantics: replace the current logical line wrapper.
           var newLine = document.createElement('div');
           serialOutput.replaceChild(newLine, currentLine);
           currentLine = newLine;
+          currentLineRaw = '';
           carriageReturn = false;
         }
-        currentLine.appendChild(lineFragment);
+        currentLineRaw += renderText;
+        currentLine.appendChild(renderAnsiText(renderText));
       }
 
       var excess = serialOutput.childNodes.length - 10000;
@@ -1708,6 +1871,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         // Reset currentLine if it was removed during trimming
         if (currentLine && !serialOutput.contains(currentLine)) {
           currentLine = serialOutput.lastElementChild || null;
+          currentLineRaw = '';
         }
       }
 
@@ -1758,6 +1922,31 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var name = parts[parts.length - 1];
         document.getElementById('btn-elf').textContent = 'ELF: ' + name;
         document.getElementById('btn-elf').title = config.elfPath;
+      }
+      if (config.serialFilters) {
+        applyFilterSettings(config.serialFilters);
+      }
+    }
+
+    function applyFilterSettings(f) {
+      var cbTs = document.getElementById('filter-timestamp');
+      var inSuppress = document.getElementById('filter-suppress');
+      var inHighlight = document.getElementById('filter-highlight');
+      if (f.timestamp !== undefined) {
+        filterState.timestamp = !!f.timestamp;
+        cbTs.checked = filterState.timestamp;
+      }
+      if (f.suppressPattern !== undefined) {
+        inSuppress.value = f.suppressPattern;
+        filterSetSuppressPattern(f.suppressPattern);
+        inSuppress.classList.toggle('filter-error',
+          f.suppressPattern !== '' && filterState._suppressRe === null);
+      }
+      if (f.highlightPattern !== undefined) {
+        inHighlight.value = f.highlightPattern;
+        filterSetHighlightPattern(f.highlightPattern);
+        inHighlight.classList.toggle('filter-error',
+          f.highlightPattern !== '' && filterState._highlightRe === null);
       }
     }
 

@@ -157,6 +157,21 @@
             "Open monitor as editor tab (legacy behavior)"
           ],
           "description": "Location where the ESP Crash Monitor should open"
+        },
+        "esp-decoder.serialFilters.timestamp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prepend a timestamp (HH:MM:SS.mmm) to each line in the serial monitor"
+        },
+        "esp-decoder.serialFilters.suppressPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern — lines matching this pattern are hidden in the serial monitor (e.g. '^\\s*$' to hide blank lines)"
+        },
+        "esp-decoder.serialFilters.highlightPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern — matches are highlighted (inverse colours) in the serial monitor"
         }
       }
     }
