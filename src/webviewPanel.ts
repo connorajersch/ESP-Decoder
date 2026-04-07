@@ -1276,6 +1276,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     };
     // Holds a trailing incomplete CSI sequence from the previous data chunk
     let ansiTail = '';
+    let carriageReturn = false;
+    let currentLine = null;
 
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
@@ -1393,6 +1395,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // Reset ANSI colour state so stale styles don't bleed into the next run
       resetAnsiState();
       ansiTail = '';
+      carriageReturn = false;
+      currentLine = null;
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1604,67 +1608,97 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     }
 
-    function appendSerialData(text) {
-      // Prepend any incomplete CSI sequence carried over from the previous chunk
-      // so sequences split across IPC messages are reassembled before parsing.
-      text = ansiTail + text;
-      ansiTail = '';
-
-      // Match completed CSI escape sequences: ESC [ params final-byte
-      // \\x1B in the template literal produces \x1B in the HTML/JS source,
-      // which the browser's JS regex engine interprets as ESC (0x1B).
-      // eslint-disable-next-line no-control-regex
-      const re = /\\x1B\\[(.*?)([@-~])/g;
-      const fragment = document.createDocumentFragment();
-      let i = 0;
+    function renderAnsiText(text) {
+      var re = /\\x1b\\[(.*?)([@-~])/g;
+      var fragment = document.createDocumentFragment();
+      var i = 0;
       re.lastIndex = 0;
-
-      while (true) {
-        const match = re.exec(text);
-        if (!match) break;
-        const node = ansiMakeNode(text.substring(i, match.index));
-        if (node) fragment.appendChild(node);
+      var match;
+      while ((match = re.exec(text)) !== null) {
+        var node = ansiMakeNode(text.substring(i, match.index));
+        if (node) { fragment.appendChild(node); }
         i = match.index + match[0].length;
-        // Only apply colour/style for SGR sequences (final byte 'm')
         if (match[2] === 'm') {
-          const codes = match[1] === '' ? ['0'] : match[1].split(';');
-          for (const code of codes) {
-            ansiApplyCode(parseInt(code, 10) || 0);
+          var codes = match[1] === '' ? ['0'] : match[1].split(';');
+          for (var ci = 0; ci < codes.length; ci++) {
+            ansiApplyCode(parseInt(codes[ci], 10) || 0);
           }
         }
       }
+      var tail = ansiMakeNode(text.substring(i));
+      if (tail) { fragment.appendChild(tail); }
+      return fragment;
+    }
 
-      // If the remaining tail starts with a partial CSI sequence (ESC or ESC[...)
-      // without a terminating final-byte, hold it for the next chunk so it is not
-      // rendered as raw garbage characters.
-      // eslint-disable-next-line no-control-regex
-      const tail = text.substring(i);
-      const partialCSI = /\\x1B(?:\\[.*)?$/.exec(tail);
-      if (partialCSI) {
-        ansiTail = partialCSI[0];
-        const node = ansiMakeNode(tail.substring(0, partialCSI.index));
-        if (node) fragment.appendChild(node);
-      } else {
-        const node = ansiMakeNode(tail);
-        if (node) fragment.appendChild(node);
+    function appendSerialData(text) {
+      text = ansiTail + text;
+      ansiTail = '';
+
+      var CR = String.fromCharCode(13), LF = String.fromCharCode(10);
+      var CRLF = CR + LF;
+      var parts = text.split(new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')'));
+
+      // Ensure there is a currentLine wrapper to accumulate spans into.
+      if (!currentLine) {
+        currentLine = document.createElement('div');
+        serialOutput.appendChild(currentLine);
       }
-      serialOutput.appendChild(fragment);
 
-      // Trim excess nodes in a single DOM operation.  replaceChildren() with
-      // only the nodes to keep is faster than removing excess nodes one-by-one
-      // because it triggers a single layout invalidation instead of one per call.
-      const excess = serialOutput.childNodes.length - 10000;
+      for (var p = 0; p < parts.length; p++) {
+        var part = parts[p];
+        if (p % 2 === 1) {
+          if (part === CR) {
+            // Bare CR: mark for overwrite on next text chunk.
+            carriageReturn = true;
+          } else {
+            // LF or CRLF: emit a new logical line.
+            carriageReturn = false;
+            currentLine = document.createElement('div');
+            serialOutput.appendChild(currentLine);
+          }
+          continue;
+        }
+        if (part === '') { continue; }
+
+        // Fix trailing-ANSI detection: find the last escape byte and only
+        // treat it as an incomplete tail if it doesn't form a complete sequence.
+        var renderText = part;
+        if (p === parts.length - 1) {
+          var lastEscape = part.lastIndexOf('\x1b');
+          if (lastEscape !== -1) {
+            var candidate = part.substring(lastEscape);
+            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][\\x00-\\x1f]?)').test(candidate);
+            if (!completeEscape) {
+              ansiTail = candidate;
+              renderText = part.substring(0, lastEscape);
+            }
+          }
+        }
+
+        var lineFragment = renderAnsiText(renderText);
+        if (carriageReturn && currentLine) {
+          // Overwrite semantics: replace the current logical line wrapper.
+          var newLine = document.createElement('div');
+          serialOutput.replaceChild(newLine, currentLine);
+          currentLine = newLine;
+          carriageReturn = false;
+        }
+        currentLine.appendChild(lineFragment);
+      }
+
+      var excess = serialOutput.childNodes.length - 10000;
       if (excess > 0) {
-        const keep = Array.from(serialOutput.childNodes).slice(excess);
-        serialOutput.replaceChildren(...keep);
+        var keep = Array.from(serialOutput.childNodes).slice(excess);
+        serialOutput.replaceChildren.apply(serialOutput, keep);
+        // Reset currentLine if it was removed during trimming
+        if (currentLine && !serialOutput.contains(currentLine)) {
+          currentLine = serialOutput.lastElementChild || null;
+        }
       }
 
-      // Schedule a single autoscroll per animation frame to avoid forcing a
-      // layout reflow on every incoming message (which is very expensive at
-      // high baud rates and causes the terminal to slow down significantly).
       if (autoscroll && !scrollRAFPending) {
         scrollRAFPending = true;
-        requestAnimationFrame(() => {
+        requestAnimationFrame(function() {
           scrollRAFPending = false;
           if (autoscroll) {
             programmaticScroll = true;
