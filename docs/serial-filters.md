@@ -6,7 +6,7 @@ The serial monitor includes a filter toolbar that lets you transform, suppress, 
 
 ## Toolbar Overview
 
-```
+```text
 Filters: [✓ Timestamp] | Suppress: [regex…] | Highlight: [regex…] | Dedup: [regex…] after [N] | [Save]
 ```
 
@@ -22,7 +22,7 @@ Prepends a dimmed `[HH:MM:SS.mmm]` timestamp to every completed line.
 
 **Example output:**
 
-```
+```text
 [12:34:56.789] I (1234) wifi: connected to AP
 [12:34:56.812] I (1235) app_main: starting loop
 ```
@@ -90,19 +90,19 @@ The input field turns red if the regex is invalid. Set the pattern to empty to d
 
 ArduinoOTA prints a `.` for every kilobyte transferred, all on one line:
 
-```
+```text
 ...................................................................................................
 ```
 
 With pattern `\.` and threshold `3`:
 
-```
+```text
 ... ×98
 ```
 
 ### ESP-IDF flash progress `#`
 
-```
+```text
 ######## ×512
 ```
 
@@ -110,7 +110,7 @@ Pattern: `#`, threshold: `8`
 
 ### Spinner characters
 
-```
+```text
 | ×47
 ```
 
