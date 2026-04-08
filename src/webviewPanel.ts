@@ -1168,7 +1168,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .ansi-blink { animation: ansi-blink 1s step-end infinite; }
     .ansi-blink-fast { animation: ansi-blink 0.5s step-end infinite; }
     .ansi-hidden { visibility: hidden; }
-    .ansi-reverse { filter: invert(1); }
+    .ansi-reverse { background: var(--fg); color: var(--bg); }
     @keyframes ansi-blink { 50% { opacity: 0; } }
     .ansi-fg-black   { color: rgb(128,128,128); }
     .ansi-fg-red     { color: rgb(255,  0,  0); }
