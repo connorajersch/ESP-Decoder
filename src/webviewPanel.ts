@@ -1985,6 +1985,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (currentLine && !serialOutput.contains(currentLine)) {
           currentLine = serialOutput.lastElementChild || null;
           currentLineRaw = '';
+          dedupResetLine();
         }
       }
 
