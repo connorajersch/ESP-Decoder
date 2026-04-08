@@ -196,11 +196,18 @@ export function activate(context: vscode.ExtensionContext) {
     tryAutoDetectElf();
   }
 
-  // Re-sync webview when serial filter settings change
+  // Re-sync webview when serial filter settings change.
+  // Debounced to avoid multiple syncState() calls when saveFilters writes
+  // several individual settings keys in quick succession.
+  let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('esp-decoder.serialFilters') && viewProvider) {
-        viewProvider.syncState();
+        if (syncDebounceTimer !== null) { clearTimeout(syncDebounceTimer); }
+        syncDebounceTimer = setTimeout(() => {
+          syncDebounceTimer = null;
+          viewProvider!.syncState();
+        }, 50);
       }
     })
   );
