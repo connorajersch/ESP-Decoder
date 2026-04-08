@@ -82,7 +82,7 @@ The badge updates in real time as more matching characters arrive — no new DOM
 | `esp-decoder.serialFilters.dedupPattern` | string | `""` | Regex matching the character(s) to collapse |
 | `esp-decoder.serialFilters.dedupThreshold` | number | `3` | Number of matches to show before collapsing |
 
-The input field turns red if the regex is invalid. Set pattern to empty or threshold to `0` to disable.
+The input field turns red if the regex is invalid. Set the pattern to empty to disable.
 
 **Examples:**
 
