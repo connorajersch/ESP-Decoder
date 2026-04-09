@@ -239,9 +239,14 @@ export class SerialPortManager extends vscode.Disposable {
     }
     this._selectedPath = this._suspendedPath;
     this._baudRate = this._suspendedBaudRate ?? this._baudRate;
+    // Only clear suspended state after a successful connect so that
+    // callers (e.g. reacquireWithRetry) can retry on failure.
+    const connected = await this.connect();
+    if (!connected) {
+      throw new Error(`Failed to reopen serial port ${this._selectedPath}`);
+    }
     this._suspendedPath = undefined;
     this._suspendedBaudRate = undefined;
-    await this.connect();
   }
 
   dispose(): void {

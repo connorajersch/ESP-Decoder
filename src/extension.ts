@@ -463,15 +463,13 @@ async function reacquireWithRetry(
  * /dev/tty.* refer to the same physical device.
  */
 function isSameSerialPort(a: string, b: string): boolean {
-  if (a === b) {
-    return true;
-  }
   return normalizePortPath(a) === normalizePortPath(b);
 }
 
 function normalizePortPath(p: string): string {
   // macOS: /dev/cu.usbmodemXXX ↔ /dev/tty.usbmodemXXX
-  return p.replace(/^\/dev\/cu\./, '/dev/tty.');
+  // Lowercase for case-insensitive comparison (e.g. COM3 vs com3 on Windows).
+  return p.replace(/^\/dev\/cu\./, '/dev/tty.').toLowerCase();
 }
 
 function isEspIdfBuildElf(elfPath: string): boolean {
