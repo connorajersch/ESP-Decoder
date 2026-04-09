@@ -25,6 +25,10 @@ export class SerialPortManager extends vscode.Disposable {
   private readonly _onConnectionChange = new vscode.EventEmitter<boolean>();
   readonly onConnectionChange = this._onConnectionChange.event;
 
+  // State for temporary port release (e.g., during pioarduino upload)
+  private _suspendedPath: string | undefined;
+  private _suspendedBaudRate: number | undefined;
+
   constructor() {
     super(() => this.dispose());
     const config = vscode.workspace.getConfiguration('esp-decoder');
@@ -168,7 +172,7 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async disconnect(): Promise<void> {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
         this._onConnectionChange.fire(false);
@@ -177,13 +181,14 @@ export class SerialPortManager extends vscode.Disposable {
       }
 
       this.port.close((err) => {
-        if (err) {
-          console.error('Error closing port:', err);
-        }
         this.port = null;
         this._isConnected = false;
         this._onConnectionChange.fire(false);
-        resolve();
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
       });
     });
   }
@@ -207,6 +212,47 @@ export class SerialPortManager extends vscode.Disposable {
         }
       });
     });
+  }
+
+  /**
+   * Temporarily release the serial port so another extension (e.g. pioarduino)
+   * can use it for flashing. The current connection state is saved so that
+   * {@link reacquirePort} can restore it afterwards.
+   */
+  async releasePort(): Promise<void> {
+    if (!this._isConnected) {
+      this._suspendedPath = undefined;
+      this._suspendedBaudRate = undefined;
+      return;
+    }
+    this._suspendedPath = this._selectedPath;
+    this._suspendedBaudRate = this._baudRate;
+    await this.disconnect();
+  }
+
+  /**
+   * Re-open the serial port that was previously released via
+   * {@link releasePort}. No-op if there was no suspended connection.
+   */
+  async reacquirePort(): Promise<void> {
+    if (!this._suspendedPath) {
+      return;
+    }
+    if (this._isConnected) {
+      this._suspendedPath = undefined;
+      this._suspendedBaudRate = undefined;
+      return;
+    }
+    this._selectedPath = this._suspendedPath;
+    this._baudRate = this._suspendedBaudRate ?? this._baudRate;
+    // Only clear suspended state after a successful connect so that
+    // callers (e.g. reacquireWithRetry) can retry on failure.
+    const connected = await this.connect();
+    if (!connected) {
+      throw new Error(`Failed to reopen serial port ${this._selectedPath}`);
+    }
+    this._suspendedPath = undefined;
+    this._suspendedBaudRate = undefined;
   }
 
   dispose(): void {
