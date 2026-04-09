@@ -172,7 +172,7 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async disconnect(): Promise<void> {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
         this._onConnectionChange.fire(false);
@@ -181,13 +181,14 @@ export class SerialPortManager extends vscode.Disposable {
       }
 
       this.port.close((err) => {
-        if (err) {
-          console.error('Error closing port:', err);
-        }
         this.port = null;
         this._isConnected = false;
         this._onConnectionChange.fire(false);
-        resolve();
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
       });
     });
   }
@@ -235,6 +236,11 @@ export class SerialPortManager extends vscode.Disposable {
    */
   async reacquirePort(): Promise<void> {
     if (!this._suspendedPath) {
+      return;
+    }
+    if (this._isConnected) {
+      this._suspendedPath = undefined;
+      this._suspendedBaudRate = undefined;
       return;
     }
     this._selectedPath = this._suspendedPath;

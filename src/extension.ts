@@ -464,6 +464,9 @@ async function reacquireWithRetry(
       log.appendLine(`[ESP Decoder] Serial port reacquired (attempt ${attempt})`);
       return;
     } catch (err) {
+      if (attempt === maxAttempts) {
+        break;
+      }
       const delay = baseDelayMs * attempt;
       log.appendLine(
         `[ESP Decoder] Reacquire attempt ${attempt}/${maxAttempts} failed — retrying in ${delay}ms`,
