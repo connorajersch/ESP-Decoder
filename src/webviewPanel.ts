@@ -557,9 +557,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     this.logFilePath = path.join(logDir, filename);
-    this.logStream = fs.createWriteStream(this.logFilePath, { flags: 'a', encoding: 'utf8' });
-    this.log.appendLine(`[ESP Decoder] Log2File started: ${this.logFilePath}`);
-    vscode.window.showInformationMessage(`Logging to ${this.logFilePath}`);
+    const stream = fs.createWriteStream(this.logFilePath, { flags: 'a', encoding: 'utf8' });
+    await new Promise<void>((resolve, reject) => {
+      stream.once('open', () => resolve());
+      stream.once('error', (err) => reject(err));
+    }).then(() => {
+      this.logStream = stream;
+      this.log.appendLine(`[ESP Decoder] Log2File started: ${this.logFilePath}`);
+      vscode.window.showInformationMessage(`Logging to ${this.logFilePath}`);
+    }).catch((err) => {
+      stream.destroy();
+      this.logFilePath = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.appendLine(`[ESP Decoder] Log2File failed to open: ${msg}`);
+      vscode.window.showErrorMessage(`Failed to start logging: ${msg}`);
+    });
   }
 
   /**
@@ -571,65 +583,78 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
    */
   private writeFilteredLog(text: string): void {
     if (!this.logStream || !this.logFilterConfig) { return; }
-    const cfg = this.logFilterConfig;
 
     this.logLineBuffer += text;
-    const parts = this.logLineBuffer.split(/\r?\n/);
+    const parts = this.logLineBuffer.split(/\r|\r?\n/);
     // Keep the last (possibly incomplete) segment in the buffer
     this.logLineBuffer = parts.pop() || '';
 
     for (const rawLine of parts) {
-      // Suppress filter
-      if (cfg.suppressRe && cfg.suppressRe.test(rawLine)) {
-        this.logDedupCount = 0;
-        continue;
-      }
-
-      let line = rawLine;
-
-      // Dedup filter
-      if (cfg.dedupRe) {
-        cfg.dedupRe.lastIndex = 0;
-        let result = '';
-        let lastIdx = 0;
-        let m: RegExpExecArray | null;
-        let lineDedup = 0;
-        while ((m = cfg.dedupRe.exec(line)) !== null) {
-          result += line.slice(lastIdx, m.index);
-          this.logDedupCount++;
-          lineDedup++;
-          if (this.logDedupCount <= cfg.dedupThreshold) {
-            result += m[0];
-          }
-          lastIdx = m.index + m[0].length;
-        }
-        result += line.slice(lastIdx);
-        if (this.logDedupCount > cfg.dedupThreshold && lineDedup > 0) {
-          result += ` [x${this.logDedupCount}]`;
-        }
-        line = result;
-      }
-
-      // Reset dedup count per line (matching webview behavior)
-      this.logDedupCount = 0;
-
-      // Timestamp filter
-      if (cfg.timestamp) {
-        const now = new Date();
-        const ts = now.toISOString().slice(11, 23);
-        line = `[${ts}] ${line}`;
-      }
-
-      this.logStream.write(line + '\n');
+      this.finalizeLogLine(rawLine);
     }
+  }
+
+  /**
+   * Process a single complete raw line through suppress, dedup, and timestamp
+   * filters and write the result to the log stream.
+   */
+  private finalizeLogLine(rawLine: string): void {
+    if (!this.logStream || !this.logFilterConfig) { return; }
+    const cfg = this.logFilterConfig;
+
+    // Suppress filter
+    if (cfg.suppressRe && cfg.suppressRe.test(rawLine)) {
+      this.logDedupCount = 0;
+      return;
+    }
+
+    let line = rawLine;
+
+    // Dedup filter
+    if (cfg.dedupRe) {
+      cfg.dedupRe.lastIndex = 0;
+      let result = '';
+      let lastIdx = 0;
+      let m: RegExpExecArray | null;
+      let lineDedup = 0;
+      while ((m = cfg.dedupRe.exec(line)) !== null) {
+        result += line.slice(lastIdx, m.index);
+        this.logDedupCount++;
+        lineDedup++;
+        if (this.logDedupCount <= cfg.dedupThreshold) {
+          result += m[0];
+        }
+        lastIdx = m.index + m[0].length;
+      }
+      result += line.slice(lastIdx);
+      if (this.logDedupCount > cfg.dedupThreshold && lineDedup > 0) {
+        result += ` [x${this.logDedupCount}]`;
+      }
+      line = result;
+    }
+
+    // Reset dedup count per line (matching webview behavior)
+    this.logDedupCount = 0;
+
+    // Timestamp filter
+    if (cfg.timestamp) {
+      const now = new Date();
+      const ts = now.toISOString().slice(11, 23);
+      line = `[${ts}] ${line}`;
+    }
+
+    this.logStream.write(line + '\n');
   }
 
   private stopLogToFile(): void {
     if (this.logStream) {
-      // Flush remaining line buffer
+      // Flush remaining line buffer through filters
       if (this.logFiltered && this.logLineBuffer) {
-        this.logStream.write(this.logLineBuffer + '\n');
+        const remaining = this.logLineBuffer.split(/\r|\r?\n/);
         this.logLineBuffer = '';
+        for (const seg of remaining) {
+          this.finalizeLogLine(seg);
+        }
       }
       this.logStream.end();
       this.logStream = null;
@@ -1597,7 +1622,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // on the first non-empty chunk of each line.
     function applyChunkFilters(chunk) {
       if (chunk === '') { return chunk; }
-      var out = chunk;
+      // Apply dedup first on raw device payload before adding ANSI sequences.
+      var out = applyDedupToChunk(chunk);
       // Prepend timestamp once at the start of the line.
       if (filterState.timestamp && !filterState._lineStarted) {
         var now = new Date();
@@ -1614,8 +1640,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           return ESC + '[7m' + m + ESC + '[27m';
         });
       }
-      // Apply dedup.
-      out = applyDedupToChunk(out);
       return out;
     }
 

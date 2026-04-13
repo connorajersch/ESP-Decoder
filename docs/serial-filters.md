@@ -33,7 +33,7 @@ Useful for correlating serial events with external logs or measuring time betwee
 
 ## Suppress
 
-Hides lines whose full text matches a given regular expression. The line is removed from the DOM entirely — it does not count toward the line limit.
+Hides lines that match a given regular expression. The pattern is evaluated with JavaScript `RegExp.test()`, which succeeds if the regex matches **anywhere** in the line (a substring match) unless you explicitly anchor it with `^` and/or `$`.
 
 **VS Code setting:** `esp-decoder.serialFilters.suppressPattern` (string, default `""`)
 
@@ -43,10 +43,10 @@ The input field turns red if the regex is invalid.
 
 | Pattern | Effect |
 |---|---|
-| `^\s*$` | Hide blank / whitespace-only lines |
-| `^\[V\]` | Hide verbose-level ESP-IDF log lines |
-| `heap_caps` | Hide any line containing `heap_caps` |
-| `^D \(\d+\)` | Hide ESP-IDF debug lines |
+| `^\s*$` | Hide blank / whitespace-only lines (anchored — must match the entire line) |
+| `^\[V\]` | Hide lines starting with `[V]` (start-anchored) |
+| `heap_caps` | Hide any line containing `heap_caps` (unanchored — substring match) |
+| `^D \(\d+\)` | Hide lines starting with `D (nnn)` — ESP-IDF debug lines |
 
 ---
 
