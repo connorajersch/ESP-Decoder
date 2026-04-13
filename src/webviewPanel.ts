@@ -587,12 +587,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       this.logStream = stream;
       this.log.appendLine(`[ESP Decoder] Log2File started: ${this.logFilePath}`);
       vscode.window.showInformationMessage(`Logging to ${this.logFilePath}`);
+      this.postMessage({ type: 'logStarted' });
     }).catch((err) => {
       stream.destroy();
       this.logFilePath = null;
       const msg = err instanceof Error ? err.message : String(err);
       this.log.appendLine(`[ESP Decoder] Log2File failed to open: ${msg}`);
       vscode.window.showErrorMessage(`Failed to start logging: ${msg}`);
+      this.postMessage({ type: 'logFailed' });
     });
   }
 
@@ -607,7 +609,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     if (!this.logStream || !this.logFilterConfig) { return; }
 
     this.logLineBuffer += text;
-    const parts = this.logLineBuffer.split(/\r|\r?\n/);
+    const parts = this.logLineBuffer.split(/\r\n|[\r\n]/);
     // Keep the last (possibly incomplete) segment in the buffer
     this.logLineBuffer = parts.pop() || '';
 
@@ -672,7 +674,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     if (this.logStream) {
       // Flush remaining line buffer through filters
       if (this.logFiltered && this.logLineBuffer) {
-        const remaining = this.logLineBuffer.split(/\r|\r?\n/);
+        const remaining = this.logLineBuffer.split(/\r\n|[\r\n]/);
         this.logLineBuffer = '';
         for (const seg of remaining) {
           this.finalizeLogLine(seg);
@@ -688,6 +690,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         vscode.window.showInformationMessage(`Log saved: ${this.logFilePath}`);
       }
       this.logFilePath = null;
+      this.postMessage({ type: 'logStopped' });
     }
   }
 
@@ -1916,9 +1919,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     btnLog.addEventListener('click', function() {
       if (logActive) {
         vscode.postMessage({ type: 'stopLog' });
-        logActive = false;
-        btnLog.classList.remove('log-active');
-        btnLog.textContent = 'Log2File';
       } else {
         var customName = logFilenameInput.value.trim();
         var useFilters = logFilteredCheckbox.checked;
@@ -1932,9 +1932,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           };
         }
         vscode.postMessage(msg);
-        logActive = true;
-        btnLog.classList.add('log-active');
-        btnLog.textContent = 'Stop Log';
       }
     });
     // ────────────────────────────────────────────────────────────────────────
@@ -2118,6 +2115,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case 'initialState':
           updateConnectionState(msg.connected, msg.port, msg.baudRate);
           updateConfigDisplay(msg);
+          break;
+        case 'logStarted':
+          logActive = true;
+          btnLog.classList.add('log-active');
+          btnLog.textContent = 'Stop Log';
+          break;
+        case 'logFailed':
+          logActive = false;
+          btnLog.classList.remove('log-active');
+          btnLog.textContent = 'Log2File';
+          break;
+        case 'logStopped':
+          logActive = false;
+          btnLog.classList.remove('log-active');
+          btnLog.textContent = 'Log2File';
           break;
         case 'error':
           appendError(msg.message);

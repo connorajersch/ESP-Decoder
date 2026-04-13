@@ -276,6 +276,9 @@ async function tryAutoDetectElf(): Promise<void> {
           targetArch: sessionConfig.targetArch || newest.targetArch,
           romElfPath: newest.romElfPath,
         };
+        if (viewProvider) {
+          viewProvider.updateConfig(sessionConfig);
+        }
       }
     }
   } catch {
