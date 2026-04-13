@@ -196,18 +196,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "serialport": "^12.0.0",
+    "serialport": "^13.0.0",
     "trbr": "^0.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.56.1",
-    "@typescript-eslint/parser": "^8.56.1",
-    "esbuild": "^0.27.4",
-    "eslint": "^10.0.3",
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.2.0",
     "pioarduino-node-helpers": "^12.4.4",
-    "typescript": "^5.4.0",
-    "vitest": "^4.1.2"
+    "typescript": "6.0.2",
+    "vitest": "^4.1.4"
   }
 }
