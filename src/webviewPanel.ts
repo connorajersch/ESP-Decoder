@@ -47,6 +47,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private logFilterConfig: { timestamp: boolean; suppressRe: RegExp | null; dedupRe: RegExp | null; dedupThreshold: number } | null = null;
   private logLineBuffer = '';
   private logDedupCount = 0;
+  // Saved log session params so logging can be auto-resumed after port reacquire
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private logSuspendedParams: { filtered: boolean; filters: any } | null = null;
 
   constructor(
     extensionUri: vscode.Uri,
@@ -70,9 +73,27 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     // Listen to connection changes
     this.disposables.push(
-      this.serialManager.onConnectionChange((connected) => {
+      this.serialManager.onConnectionChange(async (connected) => {
         if (!connected) {
           this.cancelSerialFlush();
+          // Suspend active log session: close the file but remember settings
+          if (this.logStream) {
+            this.logSuspendedParams = {
+              filtered: this.logFiltered,
+              filters: this.logFilterConfig ? {
+                timestamp: this.logFilterConfig.timestamp,
+                suppressPattern: this.logFilterConfig.suppressRe?.source ?? '',
+                dedupPattern: this.logFilterConfig.dedupRe?.source ?? '',
+                dedupThreshold: this.logFilterConfig.dedupThreshold,
+              } : undefined,
+            };
+            this.stopLogToFile();
+          }
+        } else if (this.logSuspendedParams) {
+          // Port reacquired — auto-start a new log file
+          const params = this.logSuspendedParams;
+          this.logSuspendedParams = null;
+          await this.startLogToFile('', params.filtered, params.filters);
         }
         this.postMessage({
           type: 'connectionChanged',
@@ -503,6 +524,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         break;
       }
       case 'stopLog': {
+        this.logSuspendedParams = null;
         this.stopLogToFile();
         break;
       }
@@ -856,6 +878,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.logSuspendedParams = null;
     this.stopLogToFile();
     this.cancelSerialFlush();
     this.crashCapturer.dispose();
