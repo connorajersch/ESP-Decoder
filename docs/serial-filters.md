@@ -124,6 +124,35 @@ Pattern: `OK`, threshold: `2` turns `OK OK OK OK OK` into `OK OK ×3`
 
 ---
 
+## Log2File
+
+Writes incoming serial data to a text file on disk. Click the **Log2File** button in the filter toolbar to start; click **Stop Log** to finish.
+
+### File location and naming
+
+The log file is created in the first open workspace folder, or `$HOME` if no folder is open. By default the filename follows the pattern `Log_HH-MM-SS_DD-MM-YYYY.txt`. You can override it by typing a custom name into the filename field next to the button.
+
+### Raw vs. filtered mode
+
+| Filtered checkbox | Behaviour |
+|---|---|
+| unchecked | Raw serial bytes are written verbatim — no filters are applied. |
+| checked | The active **Suppress**, **Timestamp**, and **Dedup** filters are applied server-side before writing. Highlight is display-only and is never written to the file. |
+
+When filtered mode is active the filters use the settings that were current at the moment **Log2File** was clicked. Changing filter inputs in the toolbar afterwards does not affect the running log session.
+
+### Behaviour during pioarduino uploads
+
+When the pioarduino extension requests the serial port for an upload, ESP Decoder automatically:
+
+1. Closes the current log file.
+2. Releases the port to the uploader.
+3. After the upload finishes and the port is reacquired, opens a **new** log file (with a fresh timestamp in the filename) using the same filter settings and resumes logging.
+
+If you explicitly click **Stop Log** before or during an upload, logging is not resumed after the upload.
+
+---
+
 ## Saving Settings
 
 Click **Save** in the filter toolbar to write all current filter values to your global VS Code settings (`settings.json`). They are restored automatically the next time the panel opens.
