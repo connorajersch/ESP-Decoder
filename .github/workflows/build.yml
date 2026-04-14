@@ -25,6 +25,8 @@ jobs:
           node-version: 24
       - name: Install NPM
         run: npm install
+      - name: Run tests
+        run: npm run test
       - name: Compile vsix package
         run: |
           npm run build
