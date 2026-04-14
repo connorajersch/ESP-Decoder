@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 crash dumps from serial port — powered by TraceBreaker (trbr).",
-  "version": "0.12.0",
+  "version": "0.20.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -145,6 +145,11 @@
           "default": true,
           "description": "Automatically scroll to bottom on new serial data"
         },
+        "esp-decoder.logDirectory": {
+          "type": "string",
+          "default": "logs",
+          "description": "Directory where Log2File output is written. Relative paths are resolved from the first workspace folder."
+        },
         "esp-decoder.monitorLocation": {
           "type": "string",
           "default": "panel",
@@ -157,6 +162,32 @@
             "Open monitor as editor tab (legacy behavior)"
           ],
           "description": "Location where the ESP Crash Monitor should open"
+        },
+        "esp-decoder.serialFilters.timestamp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prepend a timestamp (HH:MM:SS.mmm) to each line in the serial monitor"
+        },
+        "esp-decoder.serialFilters.suppressPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern — lines matching this pattern are hidden in the serial monitor (e.g. '^\\s*$' to hide blank lines)"
+        },
+        "esp-decoder.serialFilters.highlightPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern — matches are highlighted (inverse colours) in the serial monitor"
+        },
+        "esp-decoder.serialFilters.dedupPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern for repeated characters/strings to collapse in the serial monitor (e.g. \\\\. for dots). Matches beyond the threshold are hidden and counted."
+        },
+        "esp-decoder.serialFilters.dedupThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Number of regex matches to show before collapsing repeated characters (dedupPattern)"
         }
       }
     }
@@ -170,18 +201,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "serialport": "^12.0.0",
+    "serialport": "^13.0.0",
     "trbr": "^0.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.56.1",
-    "@typescript-eslint/parser": "^8.56.1",
-    "esbuild": "^0.27.4",
-    "eslint": "^10.0.3",
-    "pioarduino-node-helpers": "^12.4.1",
-    "typescript": "^5.4.0",
-    "vitest": "^4.1.2"
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.2.0",
+    "pioarduino-node-helpers": "^12.4.4",
+    "typescript": "6.0.2",
+    "vitest": "^4.1.4"
   }
 }

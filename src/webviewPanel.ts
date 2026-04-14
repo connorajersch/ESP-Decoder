@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
@@ -37,6 +40,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private static readonly SERIAL_FLUSH_INTERVAL_MS = 50;
   private readonly utf8Decoder = new StringDecoder('utf8');
 
+  // Log2File state
+  private logStream: import('fs').WriteStream | null = null;
+  private logFilePath: string | null = null;
+  private logFiltered = false;
+  private logFilterConfig: { timestamp: boolean; suppressRe: RegExp | null; dedupRe: RegExp | null; dedupThreshold: number } | null = null;
+  private logLineBuffer = '';
+  private logDedupCount = 0;
+  // Saved log session params so logging can be auto-resumed after port reacquire
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private logSuspendedParams: { filtered: boolean; filters: any } | null = null;
+
   constructor(
     extensionUri: vscode.Uri,
     serialManager: SerialPortManager,
@@ -59,9 +73,27 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     // Listen to connection changes
     this.disposables.push(
-      this.serialManager.onConnectionChange((connected) => {
+      this.serialManager.onConnectionChange(async (connected) => {
         if (!connected) {
           this.cancelSerialFlush();
+          // Suspend active log session: close the file but remember settings
+          if (this.logStream) {
+            this.logSuspendedParams = {
+              filtered: this.logFiltered,
+              filters: this.logFilterConfig ? {
+                timestamp: this.logFilterConfig.timestamp,
+                suppressPattern: this.logFilterConfig.suppressRe?.source ?? '',
+                dedupPattern: this.logFilterConfig.dedupRe?.source ?? '',
+                dedupThreshold: this.logFilterConfig.dedupThreshold,
+              } : undefined,
+            };
+            this.stopLogToFile();
+          }
+        } else if (this.logSuspendedParams) {
+          // Port reacquired — auto-start a new log file
+          const params = this.logSuspendedParams;
+          this.logSuspendedParams = null;
+          await this.startLogToFile('', params.filtered, params.filters);
         }
         this.postMessage({
           type: 'connectionChanged',
@@ -208,7 +240,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.syncState();
   }
 
-  private syncState(): void {
+  public syncState(): void {
+    const cfg = vscode.workspace.getConfiguration('esp-decoder');
     this.postMessage({
       type: 'initialState',
       connected: this.serialManager.isConnected,
@@ -216,6 +249,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       baudRate: this.serialManager.baudRate,
       elfPath: this.config.elfPath,
       targetArch: this.config.targetArch,
+      serialFilters: {
+        timestamp: cfg.get<boolean>('serialFilters.timestamp', false),
+        suppressPattern: cfg.get<string>('serialFilters.suppressPattern', ''),
+        highlightPattern: cfg.get<string>('serialFilters.highlightPattern', ''),
+        dedupPattern: cfg.get<string>('serialFilters.dedupPattern', ''),
+        dedupThreshold: cfg.get<number>('serialFilters.dedupThreshold', 3),
+      },
     });
   }
 
@@ -237,6 +277,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Use StringDecoder to correctly handle multi-byte UTF-8 characters
     // (e.g. ▂▄▆█) that may be split across consecutive data chunks.
     const text = this.utf8Decoder.write(data);
+
+    // Write to log file if logging is active
+    if (this.logStream) {
+      if (this.logFiltered && this.logFilterConfig) {
+        this.writeFilteredLog(text);
+      } else {
+        this.logStream.write(text);
+      }
+    }
 
     // Buffer outgoing display data and flush in batches.  Posting every raw
     // chunk as a separate IPC message can produce thousands of messages per
@@ -383,6 +432,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.crashEvents = [];
         this.crashCapturer.reset();
         break;
+      case 'saveFilters': {
+        const cfg = vscode.workspace.getConfiguration('esp-decoder');
+        await cfg.update('serialFilters.timestamp', message.timestamp, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.suppressPattern', message.suppressPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.highlightPattern', message.highlightPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.dedupPattern', message.dedupPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.dedupThreshold', message.dedupThreshold, vscode.ConfigurationTarget.Global);
+        break;
+      }
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
         if (event && this.config.elfPath) {
@@ -457,6 +515,202 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         await this.handleDecodeCoredumpFile();
         break;
       }
+      case 'startLog': {
+        await this.startLogToFile(
+          typeof message.filename === 'string' ? message.filename : '',
+          !!message.filtered,
+          message.filters,
+        );
+        break;
+      }
+      case 'stopLog': {
+        this.logSuspendedParams = null;
+        this.stopLogToFile();
+        break;
+      }
+    }
+  }
+
+  /**
+   * Start logging serial data to a file.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async startLogToFile(customFilename: string, filtered?: boolean, filters?: any): Promise<void> {
+    if (this.logStream) {
+      this.stopLogToFile();
+    }
+
+    // Set up filtered logging
+    this.logFiltered = !!filtered;
+    this.logLineBuffer = '';
+    this.logDedupCount = 0;
+    if (filtered && filters) {
+      let suppressRe: RegExp | null = null;
+      let dedupRe: RegExp | null = null;
+      try { suppressRe = filters.suppressPattern ? new RegExp(filters.suppressPattern) : null; } catch { /* invalid regex ignored */ }
+      try { dedupRe = filters.dedupPattern ? new RegExp(filters.dedupPattern, 'g') : null; } catch { /* invalid regex ignored */ }
+      this.logFilterConfig = {
+        timestamp: !!filters.timestamp,
+        suppressRe,
+        dedupRe,
+        dedupThreshold: (typeof filters.dedupThreshold === 'number' && filters.dedupThreshold >= 1) ? filters.dedupThreshold : 3,
+      };
+    } else {
+      this.logFilterConfig = null;
+    }
+
+    const logDir = await this.resolveLogDirectory();
+    if (!logDir) {
+      this.postMessage({ type: 'logFailed' });
+      return;
+    }
+
+    // Build filename: use custom name or generate default "serial-YYYYMMDD_HHMMSS.log"
+    let filename: string;
+    if (customFilename) {
+      // Sanitise to prevent path traversal
+      filename = path.basename(customFilename);
+    } else {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+      const timeStr = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      filename = `serial-${dateStr}_${timeStr}.log`;
+    }
+
+    this.logFilePath = path.join(logDir, filename);
+    const stream = fs.createWriteStream(this.logFilePath, { flags: 'a', encoding: 'utf8' });
+    await new Promise<void>((resolve, reject) => {
+      stream.once('open', () => resolve());
+      stream.once('error', (err) => reject(err));
+    }).then(() => {
+      this.logStream = stream;
+      this.log.appendLine(`[ESP Decoder] Log2File started: ${this.logFilePath}`);
+      vscode.window.showInformationMessage(`Logging to ${this.logFilePath}`);
+      this.postMessage({ type: 'logStarted' });
+    }).catch((err) => {
+      stream.destroy();
+      this.logFilePath = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.appendLine(`[ESP Decoder] Log2File failed to open: ${msg}`);
+      vscode.window.showErrorMessage(`Failed to start logging: ${msg}`);
+      this.postMessage({ type: 'logFailed' });
+    });
+  }
+
+  private async resolveLogDirectory(): Promise<string | null> {
+    const cfg = vscode.workspace.getConfiguration('esp-decoder');
+    const configuredDir = cfg.get<string>('logDirectory', 'logs').trim() || 'logs';
+    const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    const resolvedDir = path.isAbsolute(configuredDir)
+      ? configuredDir
+      : path.join(workspaceDir ?? os.homedir(), configuredDir);
+
+    try {
+      await fs.promises.mkdir(resolvedDir, { recursive: true });
+      return resolvedDir;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.appendLine(`[ESP Decoder] Failed to create log directory ${resolvedDir}: ${msg}`);
+      vscode.window.showErrorMessage(`Failed to create log directory: ${resolvedDir} (${msg})`);
+      return null;
+    }
+  }
+
+  /**
+   * Stop logging serial data to file.
+   */
+  /**
+   * Write serial text through server-side filters before writing to log file.
+   * Processes text line-by-line: applies suppress, timestamp, and dedup.
+   */
+  private writeFilteredLog(text: string): void {
+    if (!this.logStream || !this.logFilterConfig) { return; }
+
+    this.logLineBuffer += text;
+    const parts = this.logLineBuffer.split(/\r\n|[\r\n]/);
+    // Keep the last (possibly incomplete) segment in the buffer
+    this.logLineBuffer = parts.pop() || '';
+
+    for (const rawLine of parts) {
+      this.finalizeLogLine(rawLine);
+    }
+  }
+
+  /**
+   * Process a single complete raw line through suppress, dedup, and timestamp
+   * filters and write the result to the log stream.
+   */
+  private finalizeLogLine(rawLine: string): void {
+    if (!this.logStream || !this.logFilterConfig) { return; }
+    const cfg = this.logFilterConfig;
+
+    // Suppress filter
+    if (cfg.suppressRe && cfg.suppressRe.test(rawLine)) {
+      this.logDedupCount = 0;
+      return;
+    }
+
+    let line = rawLine;
+
+    // Dedup filter
+    if (cfg.dedupRe) {
+      cfg.dedupRe.lastIndex = 0;
+      let result = '';
+      let lastIdx = 0;
+      let m: RegExpExecArray | null;
+      let lineDedup = 0;
+      while ((m = cfg.dedupRe.exec(line)) !== null) {
+        result += line.slice(lastIdx, m.index);
+        this.logDedupCount++;
+        lineDedup++;
+        if (this.logDedupCount <= cfg.dedupThreshold) {
+          result += m[0];
+        }
+        lastIdx = m.index + m[0].length;
+      }
+      result += line.slice(lastIdx);
+      if (this.logDedupCount > cfg.dedupThreshold && lineDedup > 0) {
+        result += ` [x${this.logDedupCount}]`;
+      }
+      line = result;
+    }
+
+    // Reset dedup count per line (matching webview behavior)
+    this.logDedupCount = 0;
+
+    // Timestamp filter
+    if (cfg.timestamp) {
+      const now = new Date();
+      const ts = now.toISOString().slice(11, 23);
+      line = `[${ts}] ${line}`;
+    }
+
+    this.logStream.write(line + '\n');
+  }
+
+  private stopLogToFile(): void {
+    if (this.logStream) {
+      // Flush remaining line buffer through filters
+      if (this.logFiltered && this.logLineBuffer) {
+        const remaining = this.logLineBuffer.split(/\r\n|[\r\n]/);
+        this.logLineBuffer = '';
+        for (const seg of remaining) {
+          this.finalizeLogLine(seg);
+        }
+      }
+      this.logStream.end();
+      this.logStream = null;
+      this.logFiltered = false;
+      this.logFilterConfig = null;
+      this.logDedupCount = 0;
+      this.log.appendLine(`[ESP Decoder] Log2File stopped: ${this.logFilePath}`);
+      if (this.logFilePath) {
+        vscode.window.showInformationMessage(`Log saved: ${this.logFilePath}`);
+      }
+      this.logFilePath = null;
+      this.postMessage({ type: 'logStopped' });
     }
   }
 
@@ -647,6 +901,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.logSuspendedParams = null;
+    this.stopLogToFile();
     this.cancelSerialFlush();
     this.crashCapturer.dispose();
     this.addr2linePool.disposeAll();
@@ -885,6 +1141,66 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       outline: none;
     }
 
+    /* Filter toolbar */
+    .filter-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      font-size: 11px;
+    }
+    .filter-toolbar label {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      cursor: pointer;
+      white-space: nowrap;
+      opacity: 0.85;
+    }
+    .filter-toolbar label:hover { opacity: 1; }
+    .filter-toolbar input[type="checkbox"] { cursor: pointer; }
+    .filter-toolbar .filter-sep {
+      width: 1px;
+      height: 14px;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+    .filter-toolbar input[type="text"] {
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--input-border);
+      padding: 1px 5px;
+      font-size: 11px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      outline: none;
+      width: 140px;
+      border-radius: 2px;
+    }
+    .filter-toolbar input[type="text"].filter-error {
+      border-color: var(--error-fg);
+    }
+    .filter-toolbar .filter-label { opacity: 0.6; }
+    .filter-toolbar button.log-active {
+      background: var(--success-fg);
+      color: #000;
+    }
+    .filter-toolbar button.log-active:hover {
+      opacity: 0.85;
+    }
+    .dedup-badge {
+      font-size: 10px;
+      opacity: 0.6;
+      margin-left: 5px;
+      background: var(--border);
+      padding: 0 4px;
+      border-radius: 3px;
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
+
     /* Crash Events Panel */
     .crash-list {
       flex: 1;
@@ -1090,6 +1406,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     /* ANSI colour support for serial output */
     .ansi-bold { font-weight: bold; }
+    .ansi-dim { opacity: 0.5; }
     .ansi-italic { font-style: italic; }
     .ansi-underline { text-decoration: underline; }
     .ansi-strikethrough { text-decoration: line-through; }
@@ -1097,6 +1414,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .ansi-blink { animation: ansi-blink 1s step-end infinite; }
     .ansi-blink-fast { animation: ansi-blink 0.5s step-end infinite; }
     .ansi-hidden { visibility: hidden; }
+    .ansi-reverse { background: var(--fg); color: var(--bg); }
     @keyframes ansi-blink { 50% { opacity: 0; } }
     .ansi-fg-black   { color: rgb(128,128,128); }
     .ansi-fg-red     { color: rgb(255,  0,  0); }
@@ -1221,6 +1539,38 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   <!-- Serial Monitor Panel -->
   <div class="panel active" id="panel-serial" style="position:relative">
+    <!-- Filter toolbar -->
+    <div class="filter-toolbar" id="filter-toolbar">
+      <span class="filter-label">Filters:</span>
+      <label title="Prepend HH:MM:SS.mmm timestamp to each line">
+        <input type="checkbox" id="filter-timestamp"> Timestamp
+      </label>
+      <div class="filter-sep"></div>
+      <label title="Hide lines matching this regex">
+        <span class="filter-label">Suppress:</span>
+      </label>
+      <input type="text" id="filter-suppress" placeholder="regex…" title="Hide lines matching this regex (e.g. ^\s*$)">
+      <div class="filter-sep"></div>
+      <label title="Highlight matches of this regex">
+        <span class="filter-label">Highlight:</span>
+      </label>
+      <input type="text" id="filter-highlight" placeholder="regex…" title="Highlight matches of this regex">
+      <div class="filter-sep"></div>
+      <label title="Collapse repeated characters/strings matching this regex after N occurrences">
+        <span class="filter-label">Dedup:</span>
+      </label>
+      <input type="text" id="filter-dedup-pattern" placeholder="regex…" title="Regex for repeated chars to collapse (e.g. \\.)" style="width:80px">
+      <label title="Collapse after this many occurrences">after</label>
+      <input type="text" id="filter-dedup-threshold" placeholder="3" title="Collapse after N occurrences" style="width:36px">
+      <div class="filter-sep"></div>
+      <button id="filter-save" class="secondary" title="Save current filter settings to VS Code settings" style="font-size:11px;padding:1px 7px">Save</button>
+      <div class="filter-sep"></div>
+      <label title="Apply Suppress, Timestamp and Dedup filters to the log file">
+        <input type="checkbox" id="filter-log-filtered"> Filtered
+      </label>
+      <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
+      <input type="text" id="filter-log-filename" placeholder="serial-YYYYMMDD_HHMMSS.log" title="Override default log filename" style="width:200px">
+    </div>
     <div id="serial-output"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
     <div class="serial-input-row">
@@ -1273,37 +1623,153 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // scroll events and accidentally disabling autoscroll (race at high baud rates).
     let programmaticScroll = false;
 
+    // ── Serial filter state ──────────────────────────────────────────────────
+    const filterState = {
+      timestamp: false,
+      suppressPattern: '',
+      highlightPattern: '',
+      _suppressRe: null,
+      _highlightRe: null,
+      dedupPattern: '',
+      dedupThreshold: 3,
+      _dedupRe: null,
+      // runtime dedup state (per-line, reset on newline)
+      _dedupCount: 0,
+      _dedupBadge: null,   // <span class="dedup-badge"> in current DOM line
+      _lineStarted: false, // whether timestamp has been prepended for this line
+    };
+
+    function filterSetSuppressPattern(pat) {
+      filterState.suppressPattern = pat;
+      try { filterState._suppressRe = pat ? new RegExp(pat) : null; }
+      catch (_) { filterState._suppressRe = null; }
+    }
+
+    function filterSetHighlightPattern(pat) {
+      filterState.highlightPattern = pat;
+      try { filterState._highlightRe = pat ? new RegExp(pat, 'g') : null; }
+      catch (_) { filterState._highlightRe = null; }
+    }
+
+    function filterSetDedupPattern(pat) {
+      filterState.dedupPattern = pat;
+      try { filterState._dedupRe = pat ? new RegExp(pat, 'g') : null; }
+      catch (_) { filterState._dedupRe = null; }
+    }
+
+    // Reset dedup state when a new line starts.
+    function dedupResetLine() {
+      filterState._dedupCount = 0;
+      filterState._dedupBadge = null;
+      filterState._lineStarted = false;
+    }
+
+    // Apply per-chunk filters (highlight, dedup). Timestamp is prepended once
+    // on the first non-empty chunk of each line.
+    function applyChunkFilters(chunk) {
+      if (chunk === '') { return chunk; }
+      // Apply dedup first on raw device payload before adding ANSI sequences.
+      var out = applyDedupToChunk(chunk);
+      // Prepend timestamp once at the start of the line.
+      if (filterState.timestamp && !filterState._lineStarted) {
+        var now = new Date();
+        var ts = now.toISOString().slice(11, 23);
+        out = ESC + '[2m[' + ts + ']' + ESC + '[0m ' + out;
+        filterState._lineStarted = true;
+      } else if (out !== '') {
+        filterState._lineStarted = true;
+      }
+      // Apply highlight.
+      if (filterState._highlightRe) {
+        filterState._highlightRe.lastIndex = 0;
+        out = out.replace(filterState._highlightRe, function(m) {
+          return ESC + '[7m' + m + ESC + '[27m';
+        });
+      }
+      return out;
+    }
+
+    // Apply dedup to a text chunk before rendering. Returns the filtered text.
+    // Matches beyond threshold are dropped; the badge on currentLine is updated.
+    function applyDedupToChunk(chunk) {
+      if (!filterState._dedupRe || filterState.dedupThreshold < 1) { return chunk; }
+      filterState._dedupRe.lastIndex = 0;
+      var threshold = filterState.dedupThreshold;
+      var result = '';
+      var lastIndex = 0;
+      var match;
+      while ((match = filterState._dedupRe.exec(chunk)) !== null) {
+        // Append text before this match unchanged.
+        result += chunk.slice(lastIndex, match.index);
+        filterState._dedupCount++;
+        if (filterState._dedupCount <= threshold) {
+          result += match[0];
+        }
+        // Update or create the badge on the current DOM line.
+        if (filterState._dedupCount > threshold) {
+          if (!filterState._dedupBadge) {
+            filterState._dedupBadge = document.createElement('span');
+            filterState._dedupBadge.className = 'dedup-badge';
+            if (currentLine) { currentLine.appendChild(filterState._dedupBadge); }
+          }
+          filterState._dedupBadge.textContent = String.fromCharCode(215) + filterState._dedupCount;
+        }
+        lastIndex = match.index + match[0].length;
+      }
+      result += chunk.slice(lastIndex);
+      return result;
+    }
+
+    var ESC = String.fromCharCode(27);
+
+    // Returns null if the line should be suppressed, otherwise the raw line unchanged.
+    // Timestamp and highlight are applied per-chunk in applyChunkFilters instead.
+    function applyLineFilters(line) {
+      if (filterState._suppressRe && filterState._suppressRe.test(line)) { return null; }
+      return line;
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     // ANSI colour state for the serial terminal
     const ansiState = {
       bold: false, italic: false, underline: false, strikethrough: false,
-      blink: false, fastBlink: false, hidden: false,
+      blink: false, fastBlink: false, hidden: false, dim: false, reverse: false,
       fg: null, bg: null,
     };
     // Holds a trailing incomplete CSI sequence from the previous data chunk
     let ansiTail = '';
     let carriageReturn = false;
     let currentLine = null;
+    let currentLineRaw = ''; // raw text accumulator for the current line (for filters)
+    var CR = String.fromCharCode(13);
+    var LF = String.fromCharCode(10);
+    var CRLF = CR + LF;
+    const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
 
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
       ansiState.strikethrough=false; ansiState.blink=false; ansiState.fastBlink=false;
-      ansiState.hidden=false; ansiState.fg=null; ansiState.bg=null;
+      ansiState.hidden=false; ansiState.dim=false; ansiState.reverse=false;
+      ansiState.fg=null; ansiState.bg=null;
     }
 
     function ansiApplyCode(code) {
       switch (code) {
         case  0: resetAnsiState(); break;
         case  1: ansiState.bold=true; break;
+        case  2: ansiState.dim=true; break;
         case  3: ansiState.italic=true; break;
         case  4: ansiState.underline=true; break;
         case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
         case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
+        case  7: ansiState.reverse=true; break;
         case  8: ansiState.hidden=true; break;
         case  9: ansiState.strikethrough=true; break;
-        case 22: ansiState.bold=false; break;
+        case 22: ansiState.bold=false; ansiState.dim=false; break;
         case 23: ansiState.italic=false; break;
         case 24: ansiState.underline=false; break;
         case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
+        case 27: ansiState.reverse=false; break;
         case 28: ansiState.hidden=false; break;
         case 29: ansiState.strikethrough=false; break;
         case 30: ansiState.fg='black';   break;
@@ -1331,16 +1797,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (text === '') return null;
       const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
                         ansiState.strikethrough || ansiState.blink || ansiState.fastBlink ||
-                        ansiState.hidden || ansiState.fg || ansiState.bg;
+                        ansiState.hidden || ansiState.dim || ansiState.reverse ||
+                        ansiState.fg || ansiState.bg;
       if (!needsSpan) return document.createTextNode(text);
       const s = document.createElement('span');
       if (ansiState.bold)          s.classList.add('ansi-bold');
+      if (ansiState.dim)           s.classList.add('ansi-dim');
       if (ansiState.italic)        s.classList.add('ansi-italic');
       if (ansiState.underline)     s.classList.add('ansi-underline');
       if (ansiState.strikethrough) s.classList.add('ansi-strikethrough');
       if (ansiState.blink)         s.classList.add('ansi-blink');
       if (ansiState.fastBlink)     s.classList.add('ansi-blink-fast');
       if (ansiState.hidden)        s.classList.add('ansi-hidden');
+      if (ansiState.reverse)       s.classList.add('ansi-reverse');
       if (ansiState.fg)            s.classList.add('ansi-fg-' + ansiState.fg);
       if (ansiState.bg)            s.classList.add('ansi-bg-' + ansiState.bg);
       s.appendChild(document.createTextNode(text));
@@ -1412,6 +1881,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       ansiTail = '';
       carriageReturn = false;
       currentLine = null;
+      currentLineRaw = '';
+      dedupResetLine();
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1419,6 +1890,71 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       crashList.appendChild(noCrashes);
       vscode.postMessage({ type: 'clear' });
     });
+
+    // ── Filter toolbar listeners ─────────────────────────────────────────────
+    document.getElementById('filter-timestamp').addEventListener('change', function() {
+      filterState.timestamp = this.checked;
+    });
+
+    document.getElementById('filter-suppress').addEventListener('input', function() {
+      filterSetSuppressPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._suppressRe === null);
+    });
+
+    document.getElementById('filter-highlight').addEventListener('input', function() {
+      filterSetHighlightPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._highlightRe === null);
+    });
+
+    document.getElementById('filter-dedup-pattern').addEventListener('input', function() {
+      filterSetDedupPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._dedupRe === null);
+    });
+
+    document.getElementById('filter-dedup-threshold').addEventListener('input', function() {
+      var v = parseInt(this.value, 10);
+      filterState.dedupThreshold = (isNaN(v) || v < 1) ? 3 : v;
+    });
+
+    document.getElementById('filter-save').addEventListener('click', () => {
+      vscode.postMessage({
+        type: 'saveFilters',
+        timestamp: filterState.timestamp,
+        suppressPattern: filterState.suppressPattern,
+        highlightPattern: filterState.highlightPattern,
+        dedupPattern: filterState.dedupPattern,
+        dedupThreshold: filterState.dedupThreshold,
+      });
+    });
+
+    // ── Log2File ──────────────────────────────────────────────────────────
+    var logActive = false;
+    var btnLog = document.getElementById('filter-log2file');
+    var logFilenameInput = document.getElementById('filter-log-filename');
+    var logFilteredCheckbox = document.getElementById('filter-log-filtered');
+
+    btnLog.addEventListener('click', function() {
+      if (logActive) {
+        vscode.postMessage({ type: 'stopLog' });
+      } else {
+        var customName = logFilenameInput.value.trim();
+        var useFilters = logFilteredCheckbox.checked;
+        var msg = { type: 'startLog', filename: customName || '', filtered: useFilters };
+        if (useFilters) {
+          msg.filters = {
+            timestamp: filterState.timestamp,
+            suppressPattern: filterState.suppressPattern,
+            dedupPattern: filterState.dedupPattern,
+            dedupThreshold: filterState.dedupThreshold,
+          };
+        }
+        vscode.postMessage(msg);
+      }
+    });
+    // ────────────────────────────────────────────────────────────────────────
 
     // Paste / decode crash log modal
     document.getElementById('btn-paste-crash').addEventListener('click', () => {
@@ -1600,6 +2136,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           updateConnectionState(msg.connected, msg.port, msg.baudRate);
           updateConfigDisplay(msg);
           break;
+        case 'logStarted':
+          logActive = true;
+          btnLog.classList.add('log-active');
+          btnLog.textContent = 'Stop Log';
+          break;
+        case 'logFailed':
+          logActive = false;
+          btnLog.classList.remove('log-active');
+          btnLog.textContent = 'Log2File';
+          break;
+        case 'logStopped':
+          logActive = false;
+          btnLog.classList.remove('log-active');
+          btnLog.textContent = 'Log2File';
+          break;
         case 'error':
           appendError(msg.message);
           break;
@@ -1649,9 +2200,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       text = ansiTail + text;
       ansiTail = '';
 
-      var CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-      var CRLF = CR + LF;
-      var parts = text.split(new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')'));
+      // Split into alternating [content, separator, content, separator, ...]
+      // LINE_SPLIT_RE has a capturing group so separators are included in the array.
+      var parts = text.split(LINE_SPLIT_RE);
 
       // Ensure there is a currentLine wrapper to accumulate spans into.
       if (!currentLine) {
@@ -1661,28 +2212,42 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
       for (var p = 0; p < parts.length; p++) {
         var part = parts[p];
+
+        // Odd indices are the captured separators (CRLF, CR, or LF).
         if (p % 2 === 1) {
           if (part === CR) {
-            // Bare CR: mark for overwrite on next text chunk.
             carriageReturn = true;
           } else {
-            // LF or CRLF: emit a new logical line.
+            // LF or CRLF — run suppress filter; timestamp/highlight are already
+            // applied per-chunk during rendering so the DOM is up to date.
+            var filtered = applyLineFilters(currentLineRaw);
+            if (filtered === null) {
+              // Suppress filter matched — remove the line from DOM.
+              if (currentLine && currentLine.parentNode === serialOutput) {
+                serialOutput.removeChild(currentLine);
+              }
+            }
+            // Otherwise leave currentLine DOM intact (dedup badge preserved).
+            currentLineRaw = '';
             carriageReturn = false;
+            dedupResetLine();
             currentLine = document.createElement('div');
             serialOutput.appendChild(currentLine);
           }
           continue;
         }
+
+        // Even indices are content chunks.
         if (part === '') { continue; }
 
-        // Fix trailing-ANSI detection: find the last escape byte and only
-        // treat it as an incomplete tail if it doesn't form a complete sequence.
+        // Trailing-ANSI detection: only treat a trailing \x1b as incomplete if
+        // it doesn't form a complete CSI/escape sequence on its own.
         var renderText = part;
         if (p === parts.length - 1) {
           var lastEscape = part.lastIndexOf('\x1b');
           if (lastEscape !== -1) {
             var candidate = part.substring(lastEscape);
-            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][\\x00-\\x1f]?)').test(candidate);
+            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][^\\x00-\\x1f]?)').test(candidate);
             if (!completeEscape) {
               ansiTail = candidate;
               renderText = part.substring(0, lastEscape);
@@ -1690,15 +2255,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         }
 
-        var lineFragment = renderAnsiText(renderText);
         if (carriageReturn && currentLine) {
-          // Overwrite semantics: replace the current logical line wrapper.
           var newLine = document.createElement('div');
           serialOutput.replaceChild(newLine, currentLine);
           currentLine = newLine;
+          currentLineRaw = '';
+          dedupResetLine();
           carriageReturn = false;
         }
-        currentLine.appendChild(lineFragment);
+        var dedupedText = applyChunkFilters(renderText);
+        currentLineRaw += renderText;
+        if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
       }
 
       var excess = serialOutput.childNodes.length - 10000;
@@ -1708,6 +2275,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         // Reset currentLine if it was removed during trimming
         if (currentLine && !serialOutput.contains(currentLine)) {
           currentLine = serialOutput.lastElementChild || null;
+          currentLineRaw = '';
+          dedupResetLine();
         }
       }
 
@@ -1758,6 +2327,43 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var name = parts[parts.length - 1];
         document.getElementById('btn-elf').textContent = 'ELF: ' + name;
         document.getElementById('btn-elf').title = config.elfPath;
+      }
+      if (config.serialFilters) {
+        applyFilterSettings(config.serialFilters);
+      }
+    }
+
+    function applyFilterSettings(f) {
+      var cbTs = document.getElementById('filter-timestamp');
+      var inSuppress = document.getElementById('filter-suppress');
+      var inHighlight = document.getElementById('filter-highlight');
+      var inDedupPat = document.getElementById('filter-dedup-pattern');
+      var inDedupThr = document.getElementById('filter-dedup-threshold');
+      if (f.timestamp !== undefined) {
+        filterState.timestamp = !!f.timestamp;
+        cbTs.checked = filterState.timestamp;
+      }
+      if (f.suppressPattern !== undefined) {
+        inSuppress.value = f.suppressPattern;
+        filterSetSuppressPattern(f.suppressPattern);
+        inSuppress.classList.toggle('filter-error',
+          f.suppressPattern !== '' && filterState._suppressRe === null);
+      }
+      if (f.highlightPattern !== undefined) {
+        inHighlight.value = f.highlightPattern;
+        filterSetHighlightPattern(f.highlightPattern);
+        inHighlight.classList.toggle('filter-error',
+          f.highlightPattern !== '' && filterState._highlightRe === null);
+      }
+      if (f.dedupPattern !== undefined) {
+        inDedupPat.value = f.dedupPattern;
+        filterSetDedupPattern(f.dedupPattern);
+        inDedupPat.classList.toggle('filter-error',
+          f.dedupPattern !== '' && filterState._dedupRe === null);
+      }
+      if (f.dedupThreshold !== undefined) {
+        filterState.dedupThreshold = f.dedupThreshold || 3;
+        inDedupThr.value = filterState.dedupThreshold;
       }
     }
 

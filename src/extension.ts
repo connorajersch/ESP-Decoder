@@ -208,6 +208,22 @@ export function activate(context: vscode.ExtensionContext) {
     // Try auto-detect on activation
     tryAutoDetectElf();
   }
+
+  // Re-sync webview when serial filter settings change.
+  // Debounced to avoid multiple syncState() calls when saveFilters writes
+  // several individual settings keys in quick succession.
+  let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('esp-decoder.serialFilters') && viewProvider) {
+        if (syncDebounceTimer !== null) { clearTimeout(syncDebounceTimer); }
+        syncDebounceTimer = setTimeout(() => {
+          syncDebounceTimer = null;
+          viewProvider?.syncState();
+        }, 50);
+      }
+    })
+  );
 }
 
 function isPlatformIoBuildElf(elfPath: string): boolean {
@@ -260,6 +276,9 @@ async function tryAutoDetectElf(): Promise<void> {
           targetArch: sessionConfig.targetArch || newest.targetArch,
           romElfPath: newest.romElfPath,
         };
+        if (viewProvider) {
+          viewProvider.updateConfig(sessionConfig);
+        }
       }
     }
   } catch {
@@ -447,7 +466,7 @@ async function reacquireWithRetry(
       await serial.reacquirePort();
       log.appendLine(`[ESP Decoder] Serial port reacquired (attempt ${attempt})`);
       return;
-    } catch (err) {
+    } catch {
       if (attempt === maxAttempts) {
         break;
       }
