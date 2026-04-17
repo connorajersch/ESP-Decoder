@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.21.1] - 2026-04-18
+
+### Fixed
+- **Linux ARM64** — Fixed bug in build proccess of `serialport/bindings-cpp` (`npm:@jason2866/serialport-bindings-cpp@^13.0.4`).
+
 ## [0.21.0] - 2026-04-16
 
 ### Added
