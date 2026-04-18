@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.21.2] - 2026-04-18
+
+### Fixed
+- **Windows ARM64** — Fixed bug `Writing to COM port (GetOverlappedResult): Invalid handle` caused from `serialport/bindings-cpp` (`npm:@jason2866/serialport-bindings-cpp`).
+
 ## [0.21.1] - 2026-04-18
 
 ### Fixed
