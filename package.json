@@ -15,6 +15,7 @@
   },
   "categories": [
     "Debuggers",
+    "Testing",
     "Other"
   ],
   "keywords": [
@@ -23,14 +24,16 @@
     "crash",
     "backtrace",
     "decode",
+    "exception",
     "platformio",
     "esp-idf",
     "espressif",
     "pioarduino",
+    "arduino",
     "serial",
     "xtensa",
     "riscv",
-    "trbr"
+    "terminal"
   ],
   "activationEvents": [
     "onStartupFinished"
