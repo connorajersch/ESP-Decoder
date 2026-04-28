@@ -49,6 +49,8 @@ vi.mock('vscode', () => {
 import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
+import { registerSets } from '../vendor/trbr/decode/regs.js';
+import { gdbRegsInfoRiscvIlp32 } from '../vendor/trbr/decode/riscvPanicParse.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -356,14 +358,14 @@ describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
     expect(event?.rawText).toContain('<<<stack<<<');
   });
 
-  it('is not captured without flush (no Rebooting... terminator)', () => {
-    // ESP8266 fixture has no "Rebooting..." line, so the crash block is only
-    // finalized via flush(). Pushing data alone must NOT emit an event.
+  it('is captured without flush when ESP8266 stack end marker is present', () => {
+    // ESP8266 fixture has no "Rebooting..." line, but it includes "<<<stack<<<"
+    // which now finalizes the block immediately.
     let detected: CrashEvent | undefined;
     capturer.onCrashDetected((e) => { if (!detected) { detected = e; } });
     capturer.pushData(Buffer.from(ESP8266_CRASH_TEXT, 'utf8'));
-    // No flush — block must remain pending
-    expect(detected).toBeUndefined();
+    expect(detected).toBeDefined();
+    expect(detected?.rawText).toContain('<<<stack<<<');
   });
 });
 
@@ -680,5 +682,32 @@ describe('decodeCoredumpBase64', () => {
     );
     expect(result).toBeDefined();
     expect(result.threads).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RISC-V register layout validation
+// ---------------------------------------------------------------------------
+
+describe('RISC-V register layout', () => {
+  it('has correct register count in registerSets.riscv', () => {
+    expect(registerSets.riscv).toHaveLength(33);
+  });
+
+  it('has X0 at index 0 in registerSets.riscv', () => {
+    expect(registerSets.riscv[0]).toBe('X0');
+  });
+
+  it('has S0/FP at index 8 in registerSets.riscv', () => {
+    expect(registerSets.riscv[8]).toBe('S0/FP');
+  });
+
+  it('has MEPC at index 32 in registerSets.riscv', () => {
+    expect(registerSets.riscv[32]).toBe('MEPC');
+  });
+
+  it('matches the expected GDB ILP32 register order', () => {
+    // Use the canonical sequence from riscvPanicParse.js to avoid drift
+    expect(registerSets.riscv).toEqual(gdbRegsInfoRiscvIlp32);
   });
 });
