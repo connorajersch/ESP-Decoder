@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.23.2] - 2026-04-28
+
+### Fixed
+- **Regression: Offline crash decoding** — pasted crash logs (Decode Log) are decoded correctly again. The crash capturer is flushed immediately after feeding pasted data, ensuring the crash block is finalized and decoded (#38).
+
+## [0.23.1] - 2026-04-28
+
+### revert to build [0.22.2]
+- **broken 0.23.0**
+
 ## [0.23.0] - 2026-04-28
 
 ### Changed
