@@ -358,6 +358,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.lineBuffer = '';
     // Flush any trailing incomplete bytes so the decoder starts clean on reconnect.
     this.utf8Decoder.end();
+    // Flush any pending crash blocks so they are decoded even if the connection
+    // drops before a natural terminator (Rebooting..., Backtrace:, etc.) is seen.
+    this.crashCapturer.flush();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -523,6 +526,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             // The existing onCrashDetected listener handles detection + decoding.
             const data = Buffer.from(message.text + '\n');
             this.crashCapturer.pushData(data);
+            // Flush immediately to finalize the crash block since pasted data
+            // is a one-shot (unlike streaming serial data).
+            this.crashCapturer.flush();
           }
         }
         break;
