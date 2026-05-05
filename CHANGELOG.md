@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.2] - 2026-05-05
+
+### Added
+  - **Auto-reconnect** - for unexpected serial monitor disconnections (configurable, off by default).
+  - Settings: enable/disable auto-reconnect and set timeout (ms, default 15000).
+  - Auto-reconnect only triggers for unexpected disconnects; user-initiated or suspended disconnects are ignored.
+
 ## [0.24.1] - 2026-04-30
 
 ### Changed
