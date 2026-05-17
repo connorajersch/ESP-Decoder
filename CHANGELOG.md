@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.26.3] - 2026-05-17
+
+### Fixed
+- **Serial Monitor — high-ASCII input** — characters `> 0x7F` typed in the serial input were silently mangled before reaching the device. The serial `write()` call now uses `latin1` encoding (`Buffer.from(data, 'latin1')`), so every character in `0x00–0xFF` is sent as its exact single byte instead of being expanded into a multi-byte UTF-8 sequence (#58).
+- **Terminal line wrap** - finally fixed
+
 ## [0.26.2] - 2026-05-17
 
 ### Revert
